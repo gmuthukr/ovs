@@ -366,6 +366,9 @@ struct dp_netdev {
     /* Use measured cycles for rxq to pmd assignment. */
     bool pmd_rxq_assign_cyc;
 
+    /* Operate pmd in non-isolated but user balanced mode */
+    bool pmd_non_isolated;
+
     /* Protects the access of the 'struct dp_netdev_pmd_thread'
      * instance for non-pmd thread. */
     struct ovs_mutex non_pmd_mutex;
@@ -1528,6 +1531,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
 
     cmap_init(&dp->poll_threads);
     dp->pmd_rxq_assign_cyc = true;
+    dp->pmd_non_isolated = false;
 
     ovs_mutex_init(&dp->tx_qid_pool_mutex);
     /* We need 1 Tx queue for each possible core + 1 for non-PMD threads. */
@@ -3871,6 +3875,18 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
         }
     }
 
+    bool pmd_non_isolated = smap_get_bool(other_config, "pmd-non-isolated", false);
+    bool cur_pmd_isolation;
+    atomic_read_relaxed(&dp->pmd_non_isolated, &cur_pmd_isolation);
+    if (pmd_non_isolated != cur_pmd_isolation) {
+        atomic_store_relaxed(&dp->pmd_non_isolated, pmd_non_isolated);
+        if (pmd_non_isolated) {
+            VLOG_INFO("PMD non-isolated mode is enabled");
+        } else {
+            VLOG_INFO("PMD non-isolated mode is disabled");
+        }
+    }
+
     bool smc_enable = smap_get_bool(other_config, "smc-enable", false);
     bool cur_smc;
     atomic_read_relaxed(&dp->smc_enable_db, &cur_smc);
@@ -4561,7 +4577,7 @@ rxq_scheduling(struct dp_netdev *dp, bool pinned) OVS_REQUIRES(dp->port_mutex)
                               q->core_id, qid, netdev_get_name(port->netdev));
                 } else {
                     q->pmd = pmd;
-                    pmd->isolated = true;
+                    pmd->isolated = !(dp->pmd_non_isolated);
                     dp_netdev_pmd_unref(pmd);
                 }
             } else if (!pinned && q->core_id == OVS_CORE_UNSPEC) {
