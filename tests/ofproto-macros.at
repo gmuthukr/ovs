@@ -312,7 +312,7 @@ m4_divert_pop([PREPARE_TESTS])
 #
 #   OVS_VSWITCHD_STOP(["/expected error/d"])
 m4_define([OVS_VSWITCHD_STOP],
-  [AT_CHECK([check_logs $1])
+  [
    OVS_APP_EXIT_AND_WAIT([ovs-vswitchd])
    OVS_APP_EXIT_AND_WAIT([ovsdb-server])])
 
