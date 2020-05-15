@@ -33,13 +33,11 @@ m4_define([OVS_DPDK_PRE_PHY_SKIP],
 ])
 
 
-# OVS_DPDK_START()
+# OVS_DB_START()
 #
-# Create an empty database and start ovsdb-server. Add special configuration
-# dpdk-init to enable DPDK functionality. Start ovs-vswitchd connected to that
-# database using system devices (no dummies).
+# Create an empty database and start ovsdb-server.
 #
-m4_define([OVS_DPDK_START],
+m4_define([OVS_DB_START],
   [dnl Create database.
    AT_CHECK([touch .conf.db.~lock~])
    AT_CHECK([ovsdb-tool create conf.db $abs_top_srcdir/vswitchd/vswitch.ovsschema])
@@ -54,7 +52,16 @@ m4_define([OVS_DPDK_START],
 
    dnl Initialize database.
    AT_CHECK([ovs-vsctl --no-wait init])
+])
 
+
+# OVS_DPDK_START()
+#
+# Add special configuration dpdk-init to enable DPDK functionality.
+# Start ovs-vswitchd connected to that database using system devices (no dummies).
+#
+m4_define([OVS_DPDK_START],
+  [
    dnl Enable DPDK functionality
    AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:dpdk-init=true])
 

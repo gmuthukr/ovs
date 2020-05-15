@@ -1,6 +1,11 @@
 m4_define([CONFIGURE_VETH_OFFLOADS],
    [AT_CHECK([ethtool -K $1 tx off], [0], [ignore], [ignore])])
 
+m4_define([SET_NUMA_NODE],
+   [
+    AT_CHECK([lscpu | awk '/NUMA node\(s\)/ {c=1; while (c++<$(3)) {printf "$1,"}; print "$1"}' > NUMA_NODE])
+])
+
 AT_BANNER([OVS-DPDK unit tests])
 
 dnl --------------------------------------------------------------------------
@@ -8,6 +13,7 @@ dnl Check if EAL init is successful
 AT_SETUP([OVS-DPDK - EAL init])
 AT_KEYWORDS([dpdk])
 OVS_DPDK_PRE_CHECK()
+OVS_DB_START()
 OVS_DPDK_START()
 AT_CHECK([grep "DPDK Enabled - initializing..." ovs-vswitchd.log], [], [stdout])
 AT_CHECK([grep "EAL" ovs-vswitchd.log], [], [stdout])
@@ -27,6 +33,7 @@ AT_SETUP([OVS-DPDK - add standard DPDK port])
 AT_KEYWORDS([dpdk])
 
 OVS_DPDK_PRE_PHY_SKIP()
+OVS_DB_START()
 OVS_DPDK_START()
 
 dnl Add userspace bridge and attach it to OVS
@@ -53,6 +60,7 @@ dnl Add vhost-user-client port
 AT_SETUP([OVS-DPDK - add vhost-user-client port])
 AT_KEYWORDS([dpdk])
 OVS_DPDK_PRE_CHECK()
+OVS_DB_START()
 OVS_DPDK_START()
 
 dnl Add userspace bridge and attach it to OVS
@@ -86,11 +94,11 @@ AT_SETUP([OVS-DPDK - ping vhost-user ports])
 AT_KEYWORDS([dpdk])
 OVS_DPDK_PRE_CHECK()
 AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
 OVS_DPDK_START()
 
 dnl Find number of sockets
-AT_CHECK([lscpu], [], [stdout])
-AT_CHECK([cat stdout | grep "NUMA node(s)" | awk '{c=1; while (c++<$(3)) {printf "512,"}; print "512"}' > NUMA_NODE])
+SET_NUMA_NODE([512])
 
 dnl Add userspace bridge and attach it to OVS
 AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
@@ -163,11 +171,11 @@ AT_SETUP([OVS-DPDK - ping vhost-user-client ports])
 AT_KEYWORDS([dpdk])
 OVS_DPDK_PRE_CHECK()
 AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
 OVS_DPDK_START()
 
 dnl Find number of sockets
-AT_CHECK([lscpu], [], [stdout])
-AT_CHECK([cat stdout | grep "NUMA node(s)" | awk '{c=1; while (c++<$(3)) {printf "512,"}; print "512"}' > NUMA_NODE])
+SET_NUMA_NODE([512])
 
 dnl Add userspace bridge and attach it to OVS
 AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
@@ -230,5 +238,189 @@ OVS_VSWITCHD_STOP(["\@does not exist. The Open vSwitch kernel module is probably
 \@EAL:   Invalid NUMA socket, default to 0@d
 \@EAL: WARNING: cpu flags constant_tsc=yes nonstop_tsc=no -> using unreliable clock cycles !@d
 \@EAL: No free hugepages reported in hugepages-1048576kB@d"])
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+dnl --------------------------------------------------------------------------
+dnl validate tso negotiation (with userspace-tso)
+AT_SETUP([OVS-DPDK - validate tso negotiation (with userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+1
+])
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+
+dnl Add vhostuser port (client mode)
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuserclient0 -- set Interface \
+          dpdkvhostuserclient0 \
+          type=dpdkvhostuserclient \
+          options:vhost-server-path=$OVS_RUNDIR/dpdkvhostclient0], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostclient0,server=1" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Check whether TSO is turned on (host side)
+AT_CHECK([awk '/negotiated Virtio features/ {a=$NF} END{print a}' \
+           $OVS_RUNDIR/ovs-vswitchd.log],[],[stdout])
+AT_CHECK([printf "%X" $(( $(cat stdout) & ((1<<0)|(1<<11)|(1<<12)) ))],[],[1801])
+
+dnl Check whether TSO is turned on (guest side)
+AT_CHECK([awk 'BEGIN{n=0} /Per Port/ && /(TCP|UDP)_CKSUM/ && /TCP_TSO/ {n++} END{printf n}' \
+           $OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log],[0],[1])
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuserclient0], [], [stdout], [stderr])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Add vhostuser port (server mode)
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuser0 -- set Interface dpdkvhostuser0 \
+          type=dpdkvhostuser], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostuser0" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuser0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Check whether TSO is turned on (host side)
+AT_CHECK([awk '/negotiated Virtio features/ {a=$NF} END{print a}' \
+           $OVS_RUNDIR/ovs-vswitchd.log],[],[stdout])
+AT_CHECK([printf "%X" $(( $(cat stdout) & ((1<<0)|(1<<11)|(1<<12)) ))],[],[1801])
+
+dnl Check whether TSO is turned on (guest side)
+AT_CHECK([awk 'BEGIN{n=0} /Per Port/ && /(TCP|UDP)_CKSUM/ && /TCP_TSO/ {n++} END{printf n}' \
+           $OVS_RUNDIR/testpmd-dpdkvhostuser0.log],[0],[1])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuser0], [], [stdout], [stderr])
+OVS_VSWITCHD_STOP()
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+dnl --------------------------------------------------------------------------
+dnl validate tso negotiation (without userspace-tso)
+AT_SETUP([OVS-DPDK - validate tso negotiation (without userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+0
+])
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+
+dnl Add vhostuser port (client mode)
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuserclient0 -- set Interface \
+          dpdkvhostuserclient0 \
+          type=dpdkvhostuserclient \
+          options:vhost-server-path=$OVS_RUNDIR/dpdkvhostclient0], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostclient0,server=1" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Check whether TSO is turned off (host side)
+AT_CHECK([awk '/negotiated Virtio features/ {a=$NF} END{print a}' \
+           $OVS_RUNDIR/ovs-vswitchd.log],[],[stdout])
+AT_CHECK([printf "%X" $(( $(cat stdout) & ((1<<0)|(1<<11)|(1<<12)) ))],[],[0])
+
+dnl Check whether TSO is turned off (guest side)
+AT_CHECK([awk 'BEGIN{n=0} /Per Port/ && /(TCP|UDP)_CKSUM/ && /TCP_TSO/ {n++} END{printf n}' \
+           $OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log],[0],[0])
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuserclient0], [], [stdout], [stderr])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Add vhostuser port (server mode)
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuser0 -- set Interface dpdkvhostuser0 \
+          type=dpdkvhostuser], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostuser0" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuser0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Check whether TSO is turned off (host side)
+AT_CHECK([awk '/negotiated Virtio features/ {a=$NF} END{print a}' \
+           $OVS_RUNDIR/ovs-vswitchd.log],[],[stdout])
+AT_CHECK([printf "%X" $(( $(cat stdout) & ((1<<0)|(1<<11)|(1<<12)) ))],[],[0])
+
+dnl Check whether TSO is turned off (guest side)
+AT_CHECK([awk 'BEGIN{n=0} /Per Port/ && /(TCP|UDP)_CKSUM/ && /TCP_TSO/ {n++} END{printf n}' \
+           $OVS_RUNDIR/testpmd-dpdkvhostuser0.log],[0],[0])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuser0], [], [stdout], [stderr])
+OVS_VSWITCHD_STOP()
 AT_CLEANUP
 dnl --------------------------------------------------------------------------
