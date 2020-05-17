@@ -32,6 +32,7 @@
 #include "dirs.h"
 #include "dpif.h"
 #include "dummy.h"
+#include "event.h"
 #include "fatal-signal.h"
 #include "memory.h"
 #include "netdev.h"
@@ -111,6 +112,7 @@ main(int argc, char *argv[])
 
     bridge_init(remote);
     free(remote);
+    event_init();
 
     exiting = false;
     cleanup = false;
