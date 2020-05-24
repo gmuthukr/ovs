@@ -29,6 +29,7 @@
 #include "dirs.h"
 #include "dpif.h"
 #include "dpdk.h"
+#include "event.h"
 #include "hash.h"
 #include "openvswitch/hmap.h"
 #include "hmapx.h"
@@ -3289,6 +3290,7 @@ bridge_run(void)
         netdev_set_flow_api_enabled(&cfg->other_config);
         dpdk_init(&cfg->other_config);
         userspace_tso_init(&cfg->other_config);
+        event_init(&cfg->other_config);
     }
 
     /* Initialize the ofproto library.  This only needs to run once, but
