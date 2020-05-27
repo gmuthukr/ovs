@@ -463,7 +463,7 @@ stopwatch_thread(void *ign OVS_UNUSED)
     return NULL;
 }
 
-static void
+void
 stopwatch_exit(void)
 {
     struct shash_node *node, *node_next;
@@ -523,6 +523,24 @@ stopwatch_create(const char *name, enum stopwatch_units units)
     ovs_mutex_lock(&stopwatches_lock);
     shash_add(&stopwatches, name, sw);
     ovs_mutex_unlock(&stopwatches_lock);
+}
+
+void
+stopwatch_delete(const char *name)
+{
+    ovs_mutex_lock(&stopwatches_lock);
+    shash_find_and_delete(&stopwatches, name);
+    ovs_mutex_unlock(&stopwatches_lock);
+}
+
+unsigned int
+stopwatch_count(void)
+{
+    unsigned int n;
+    ovs_mutex_lock(&stopwatches_lock);
+    n = shash_count(&stopwatches);
+    ovs_mutex_unlock(&stopwatches_lock);
+    return n;
 }
 
 void

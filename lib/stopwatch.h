@@ -56,4 +56,13 @@ bool stopwatch_get_stats(const char *name, struct stopwatch_stats *stats);
 /* Block until all enqueued samples have been processed. */
 void stopwatch_sync(void);
 
+/* Delete stopwatch */
+void stopwatch_delete(const char *name);
+
+/* Count stopwatches */
+unsigned int stopwatch_count(void);
+
+/* Exit stopwatch */
+void stopwatch_exit(void);
+
 #endif /* stopwatch.h */
