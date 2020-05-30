@@ -1,0 +1,351 @@
+m4_define([CONFIGURE_VETH_OFFLOADS],
+   [AT_CHECK([ethtool -K $1 tx off], [0], [ignore], [ignore])])
+
+m4_define([SET_NUMA_NODE],
+   [
+    AT_CHECK([lscpu | awk '/NUMA node\(s\)/ {c=1; while (c++<$(3)) {printf "$1,"}; print "$1"}' > NUMA_NODE])
+])
+
+m4_define([CREATE_EVENT_JSON],
+   [
+    AT_CHECK[cat > $abs_top_srcdir/tests/event.json <<EOF
+[
+  {
+    "name": "rte_vhost_enqueue_burst",
+    "type": "message",
+    "definition": {
+      "resource": "timer",
+      "samples": 50,
+      "unit": "us"
+    },
+    "notify": "/tmp/event.sock"
+  },
+  {
+    "name": "netdev_send",
+    "type": "message",
+    "definition": {
+      "resource": "timer",
+      "samples": 50,
+      "unit": "us"
+    },
+    "notify": "/tmp/event.sock"
+  }
+]
+EOF]
+])
+
+AT_BANNER([OVS-DPDK perf tests])
+
+dnl --------------------------------------------------------------------------
+dnl iperf on vhostuserclient (with userspace-tso)
+AT_SETUP([OVS-DPDK - iperf on vhostuserclient (with userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true])
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:user_defined_event_enable=true])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+1
+])
+
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuserclient0 -- set Interface \
+          dpdkvhostuserclient0 \
+          type=dpdkvhostuserclient \
+          options:vhost-server-path=$OVS_RUNDIR/dpdkvhostclient0], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Set up namespaces
+ADD_NAMESPACES(ns1, ns2)
+
+dnl Add veth device
+ADD_VETH(tap1, ns2, br10, "172.31.110.12/24")
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostclient0,server=1" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Move the tap devices to the namespaces
+AT_CHECK([ps aux | grep testpmd], [], [stdout], [stderr])
+AT_CHECK([ip link show], [], [stdout], [stderr])
+AT_CHECK([ip link set tap0 netns ns1], [], [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link show | grep tap0], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link set tap0 up], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip addr add 172.31.110.11/24 dev tap0], [],
+         [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns2 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ping -c 4 -I tap0 172.31.110.12], [], [stdout],
+         [stderr])
+
+CREATE_EVENT_JSON()
+AT_CHECK([ovs-appctl event/define $abs_top_srcdir/tests/event.json],[],[ignore])
+AT_CHECK([ip netns exec ns2 iperf3 -s -1 -D])
+AT_CHECK([ip netns exec ns1 iperf3 -c 172.31.110.12],[],[stdout])
+AT_CHECK([ovs-appctl event/list --all-timer > event_list])
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuserclient0], [], [stdout], [stderr])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+AT_FAIL_IF([true])
+OVS_VSWITCHD_STOP()
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+dnl --------------------------------------------------------------------------
+dnl iperf on vhostuser (with userspace-tso)
+AT_SETUP([OVS-DPDK - iperf on vhostuser (with userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=true])
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:user_defined_event_enable=true])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+1
+])
+
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuser0 -- set Interface dpdkvhostuser0 \
+          type=dpdkvhostuser], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Set up namespaces
+ADD_NAMESPACES(ns1, ns2)
+
+dnl Add veth device
+ADD_VETH(tap1, ns2, br10, "172.31.110.12/24")
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostuser0" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuser0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Move the tap devices to the namespaces
+AT_CHECK([ps aux | grep testpmd], [], [stdout], [stderr])
+AT_CHECK([ip link show], [], [stdout], [stderr])
+AT_CHECK([ip link set tap0 netns ns1], [], [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link show | grep tap0], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link set tap0 up], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip addr add 172.31.110.11/24 dev tap0], [],
+         [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns2 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ping -c 4 -I tap0 172.31.110.12], [], [stdout],
+         [stderr])
+
+CREATE_EVENT_JSON()
+AT_CHECK([ovs-appctl event/define $abs_top_srcdir/tests/event.json],[],[ignore])
+AT_CHECK([ip netns exec ns2 iperf3 -s -1 -D])
+AT_CHECK([ip netns exec ns1 iperf3 -c 172.31.110.12],[],[stdout])
+AT_CHECK([ovs-appctl event/list --all-timer > event_list])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuser0], [], [stdout], [stderr])
+
+AT_FAIL_IF([true])
+OVS_VSWITCHD_STOP()
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+dnl --------------------------------------------------------------------------
+dnl iperf on vhostuserclient (without userspace-tso)
+AT_SETUP([OVS-DPDK - iperf on vhostuserclient (without userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false])
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:user_defined_event_enable=true])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+0
+])
+
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuserclient0 -- set Interface \
+          dpdkvhostuserclient0 \
+          type=dpdkvhostuserclient \
+          options:vhost-server-path=$OVS_RUNDIR/dpdkvhostclient0], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Set up namespaces
+ADD_NAMESPACES(ns1, ns2)
+
+dnl Add veth device
+ADD_VETH(tap1, ns2, br10, "172.31.110.12/24")
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostclient0,server=1" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuserclient0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Move the tap devices to the namespaces
+AT_CHECK([ps aux | grep testpmd], [], [stdout], [stderr])
+AT_CHECK([ip link show], [], [stdout], [stderr])
+AT_CHECK([ip link set tap0 netns ns1], [], [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link show | grep tap0], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link set tap0 up], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip addr add 172.31.110.11/24 dev tap0], [],
+         [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns2 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ping -c 4 -I tap0 172.31.110.12], [], [stdout],
+         [stderr])
+
+CREATE_EVENT_JSON()
+AT_CHECK([ovs-appctl event/define $abs_top_srcdir/tests/event.json],[],[ignore])
+AT_CHECK([ip netns exec ns2 iperf3 -s -1 -D])
+AT_CHECK([ip netns exec ns1 iperf3 -c 172.31.110.12],[],[stdout])
+AT_CHECK([ovs-appctl event/list --all-timer > event_list])
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuserclient0], [], [stdout], [stderr])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+AT_FAIL_IF([true])
+OVS_VSWITCHD_STOP()
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+dnl --------------------------------------------------------------------------
+dnl iperf on vhostuser (without userspace-tso)
+AT_SETUP([OVS-DPDK - iperf on vhostuser (without userspace-tso)])
+AT_KEYWORDS([dpdk])
+OVS_DPDK_PRE_CHECK()
+AT_SKIP_IF([! which testpmd >/dev/null 2>/dev/null])
+OVS_DB_START()
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:userspace-tso-enable=false])
+AT_CHECK([ovs-vsctl --no-wait set Open_vSwitch . other_config:user_defined_event_enable=true])
+OVS_DPDK_START()
+AT_CHECK([grep -c 'Userspace TCP Segmentation Offloading support enabled' \
+          ovs-vswitchd.log],[ignore],[dnl
+0
+])
+
+dnl Find number of sockets
+SET_NUMA_NODE([512])
+
+dnl Add userspace bridge and attach it to OVS
+AT_CHECK([ovs-vsctl add-br br10 -- set bridge br10 datapath_type=netdev])
+AT_CHECK([ovs-vsctl add-port br10 dpdkvhostuser0 -- set Interface dpdkvhostuser0 \
+          type=dpdkvhostuser], [],
+         [stdout], [stderr])
+AT_CHECK([ovs-vsctl show], [], [stdout])
+
+dnl Set up namespaces
+ADD_NAMESPACES(ns1, ns2)
+
+dnl Add veth device
+ADD_VETH(tap1, ns2, br10, "172.31.110.12/24")
+
+dnl Execute testpmd in background
+on_exit "pkill -f -x -9 'tail -f /dev/null'"
+AT_CHECK([echo "show device info all" > CMDFILE])
+AT_CHECK([echo "show port 0 tx_offload capabilities" >> CMDFILE])
+tail -f /dev/null | testpmd --socket-mem="$(cat NUMA_NODE)" --no-pci\
+           --vdev="net_virtio_user,path=$OVS_RUNDIR/dpdkvhostuser0" \
+           --vdev="net_tap0,iface=tap0" --file-prefix page0 \
+           --single-file-segments -- --cmdline-file=CMDFILE \
+           -a >$OVS_RUNDIR/testpmd-dpdkvhostuser0.log 2>&1 &
+
+dnl Give settling time to the testpmd processes - NOTE: this is bad form.
+sleep 10
+
+dnl Move the tap devices to the namespaces
+AT_CHECK([ps aux | grep testpmd], [], [stdout], [stderr])
+AT_CHECK([ip link show], [], [stdout], [stderr])
+AT_CHECK([ip link set tap0 netns ns1], [], [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link show | grep tap0], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip link set tap0 up], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ip addr add 172.31.110.11/24 dev tap0], [],
+         [stdout], [stderr])
+
+AT_CHECK([ip netns exec ns1 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns2 ip link show], [], [stdout], [stderr])
+AT_CHECK([ip netns exec ns1 ping -c 4 -I tap0 172.31.110.12], [], [stdout],
+         [stderr])
+
+CREATE_EVENT_JSON()
+AT_CHECK([ovs-appctl event/define $abs_top_srcdir/tests/event.json],[],[ignore])
+AT_CHECK([ip netns exec ns2 iperf3 -s -1 -D])
+AT_CHECK([ip netns exec ns1 iperf3 -c 172.31.110.12],[],[stdout])
+AT_CHECK([ovs-appctl event/list --all-timer > event_list])
+
+dnl Clean up the testpmd now
+pkill -f -x -9 'tail -f /dev/null'
+
+dnl Clean up
+AT_CHECK([ovs-vsctl del-port br10 dpdkvhostuser0], [], [stdout], [stderr])
+
+AT_FAIL_IF([true])
+OVS_VSWITCHD_STOP()
+AT_CLEANUP
+dnl --------------------------------------------------------------------------
+
+
