@@ -55,6 +55,7 @@ DOC_SOURCE = \
 	Documentation/topics/ovsdb-replication.rst \
 	Documentation/topics/porting.rst \
 	Documentation/topics/tracing.rst \
+	Documentation/topics/user-defined-events.rst \
 	Documentation/topics/userspace-tso.rst \
 	Documentation/topics/windows.rst \
 	Documentation/howto/index.rst \

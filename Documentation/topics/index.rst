@@ -53,3 +53,4 @@ OVS
    userspace-tso
    idl-compound-indexes
    ovs-extensions
+   user-defined-events
