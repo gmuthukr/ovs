@@ -17,6 +17,7 @@
 #include <config.h>
 #include "netdev-dpdk.h"
 
+#include <event.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -2605,6 +2606,8 @@ __netdev_dpdk_vhost_send(struct netdev *netdev, int qid,
         unsigned int tx_pkts;
 
         tx_pkts = rte_vhost_enqueue_burst(vid, vhost_qid, cur_pkts, cnt);
+        EVENT_RETFUNC_TIMER_TRY(tx_pkts, rte_vhost_enqueue_burst,
+                            vid, vhost_qid, cur_pkts, cnt);
         if (OVS_LIKELY(tx_pkts)) {
             /* Packets have been sent.*/
             cnt -= tx_pkts;

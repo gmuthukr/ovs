@@ -20,6 +20,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <event.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <net/if.h>
@@ -4297,7 +4298,9 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
     output_cnt = dp_packet_batch_size(&p->output_pkts);
     ovs_assert(output_cnt > 0);
 
-    netdev_send(p->port->netdev, tx_qid, &p->output_pkts, dynamic_txqs);
+    EVENT_FUNC_TIMER_TRY(netdev_send,
+                         p->port->netdev,
+                         tx_qid, &p->output_pkts, dynamic_txqs);
     dp_packet_batch_init(&p->output_pkts);
 
     /* Update time of the next flush. */
