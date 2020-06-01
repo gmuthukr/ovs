@@ -35,6 +35,7 @@
 #include "ovs-thread.h"
 #include "signals.h"
 #include "seq.h"
+#include "stopwatch.h"
 #include "unixctl.h"
 #include "util.h"
 #include "openvswitch/vlog.h"
@@ -294,6 +295,8 @@ time_poll(struct pollfd *pollfds, int n_pollfds, HANDLE *handles OVS_UNUSED,
     time_init();
     coverage_clear();
     coverage_run();
+    coverage_try_event();
+
     if (*last_wakeup && !thread_is_pmd()) {
         log_poll_interval(*last_wakeup);
     }

@@ -25,6 +25,7 @@
 #include "unixctl.h"
 #include "util.h"
 #include "openvswitch/vlog.h"
+#include "event.h"
 
 VLOG_DEFINE_THIS_MODULE(coverage);
 
@@ -36,6 +37,7 @@ static size_t allocated_coverage_counters = 0;
 static struct ovs_mutex coverage_mutex = OVS_MUTEX_INITIALIZER;
 
 DEFINE_STATIC_PER_THREAD_DATA(long long int, coverage_clear_time, LLONG_MIN);
+DEFINE_STATIC_PER_THREAD_DATA(long long int, coverage_event_time, LLONG_MIN);
 static long long int coverage_run_time = LLONG_MIN;
 
 /* Index counter used to compute the moving average array's index. */
@@ -51,6 +53,7 @@ static bool coverage_read_counter(const char *name,
 void
 coverage_counter_register(struct coverage_counter* counter)
 {
+    event_register(counter->name, EV_RESOURCE_COVERAGE);
     if (n_coverage_counters >= allocated_coverage_counters) {
         coverage_counters = x2nrealloc(coverage_counters,
                                        &allocated_coverage_counters,
@@ -413,4 +416,62 @@ coverage_read_counter(const char *name, unsigned long long int *count)
     }
 
     return false;
+}
+
+static void
+coverage_event__(bool trylock)
+{
+    long long int now, *thread_time;
+
+    now = time_msec();
+    thread_time = coverage_event_time_get();
+
+    /* Initialize the coverage_event_time. */
+    if (*thread_time == LLONG_MIN) {
+        *thread_time = now + COVERAGE_EVENT_INTERVAL;
+    }
+
+    if (now >= *thread_time) {
+        size_t i;
+
+        if (trylock) {
+            /* Returns if cannot acquire lock. */
+            if (event_try_lock()) {
+                return;
+            }
+            if (ovs_mutex_trylock(&coverage_mutex)) {
+                event_unlock();
+                return;
+            }
+        } else {
+            event_lock();
+            ovs_mutex_lock(&coverage_mutex);
+        }
+
+        for (i = 0; i < n_coverage_counters && event_count(); i++) {
+            struct coverage_counter *c = coverage_counters[i];
+            struct event *ev;
+
+            ev = event_get(c->name);
+            if (!ev || ev->def.resource != EV_RESOURCE_COVERAGE) {
+                continue;
+            }
+
+            ev->current = c->total;
+            ovs_mutex_unlock(&coverage_mutex);
+            ev->rate_min = coverage_array_sum(c->min, MIN_AVG_LEN) / 60.0;
+            ev->rate_hour = coverage_array_sum(c->hr,  HR_AVG_LEN) / 3600.0;
+            ovs_mutex_lock(&coverage_mutex);
+        }
+
+        ovs_mutex_unlock(&coverage_mutex);
+        event_unlock();
+        *thread_time = now + COVERAGE_EVENT_INTERVAL;
+    }
+}
+
+void
+coverage_try_event(void)
+{
+    coverage_event__(true);
 }

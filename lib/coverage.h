@@ -39,6 +39,9 @@ BUILD_ASSERT_DECL(60000 % COVERAGE_RUN_INTERVAL == 0);
 #define COVERAGE_CLEAR_INTERVAL  1000
 BUILD_ASSERT_DECL(COVERAGE_RUN_INTERVAL % COVERAGE_CLEAR_INTERVAL == 0);
 
+#define COVERAGE_EVENT_INTERVAL  1000
+BUILD_ASSERT_DECL(60000 % COVERAGE_EVENT_INTERVAL == 0);
+
 /* Defines the moving average array length. */
 #define MIN_AVG_LEN (60000/COVERAGE_RUN_INTERVAL)
 #define HR_AVG_LEN  60
@@ -90,5 +93,6 @@ void coverage_log(void);
 void coverage_clear(void);
 void coverage_try_clear(void);
 void coverage_run(void);
+void coverage_try_event(void);
 
 #endif /* coverage.h */
